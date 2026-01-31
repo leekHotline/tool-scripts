@@ -1,8 +1,12 @@
-import sys
+import argparse
 import os
 import socket
+import sys
+from typing import Optional
+
 import yt_dlp
 
+## 让cookie成为可选 默认为空
 
 def test_proxy(host: str, port: int) -> bool:
     try:
@@ -11,192 +15,199 @@ def test_proxy(host: str, port: int) -> bool:
         result = sock.connect_ex((host, port))
         sock.close()
         return result == 0
-    except:
+    except Exception:
         return False
 
 
-def setup_proxy() -> str | None:
-    existing = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+def setup_proxy() -> Optional[str]:
+    existing = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
     if existing:
         return existing
-    
-    proxy_ports = {7890: "Clash", 7891: "Clash", 10809: "V2Ray", 1080: "SS/SSR"}
-    
-    for port, name in proxy_ports.items():
+
+    proxy_ports = {
+        7890: ("Clash", "http"),
+        7891: ("Clash", "http"),
+        10809: ("V2Ray", "http"),
+        10808: ("V2Ray", "socks5h"),
+        1080: ("SS/SSR", "socks5h"),
+    }
+
+    for port, (name, scheme) in proxy_ports.items():
         if test_proxy("127.0.0.1", port):
-            proxy_url = f"http://127.0.0.1:{port}"
-            print(f"🔍 检测到 {name} 代理: {proxy_url}")
+            proxy_url = f"{scheme}://127.0.0.1:{port}"
+            print(f"[proxy] Detected {name}: {proxy_url}")
             os.environ["HTTP_PROXY"] = proxy_url
             os.environ["HTTPS_PROXY"] = proxy_url
+            os.environ["ALL_PROXY"] = proxy_url
             return proxy_url
-    
+
     return None
 
 
-def download_video(url: str, proxy: str = None):
+def build_format(max_height: int) -> str:
+    # Prefer MP4/M4A over HLS to avoid slow m3u8 downloads.
+    return (
+        f"bv*[height<={max_height}][ext=mp4][protocol^=https]+"
+        f"ba[ext=m4a][protocol^=https]/"
+        f"b*[height<={max_height}][ext=mp4][protocol^=https]/"
+        f"b*[height<={max_height}]"
+    )
+
+
+def base_opts(max_height: int, proxy: Optional[str]) -> dict:
     ydl_opts = {
         "outtmpl": "%(title).200s.%(ext)s",
-        "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+        "format": build_format(max_height),
         "merge_output_format": "mp4",
         "continuedl": True,
         "retries": 10,
         "fragment_retries": 10,
         "socket_timeout": 30,
+        "concurrent_fragment_downloads": 8,
         "noplaylist": True,
         "quiet": False,
         "cachedir": False,
-        
-        # 关键：使用 Edge 浏览器（通常没有 DPAPI 问题）
-        "cookiesfrombrowser": ("edge",),
-        
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
         },
     }
-    
     if proxy:
         ydl_opts["proxy"] = proxy
-    
-    print(f"🍪 从 Edge 获取 cookies")
-    print(f"🌐 使用代理: {proxy}")
-    print(f"⏳ 开始下载: {url}")
+    return ydl_opts
+
+
+def run_download(url: str, ydl_opts: dict) -> bool:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    return True
+
+
+def download_video(url: str, proxy: Optional[str], max_height: int, cookies: str) -> bool:
+    ydl_opts = base_opts(max_height, proxy)
+
+    if cookies == "edge":
+        ydl_opts["cookiesfrombrowser"] = ("edge",)
+    elif cookies == "firefox":
+        ydl_opts["cookiesfrombrowser"] = ("firefox",)
+    elif cookies == "none":
+        pass
+    else:
+        ydl_opts["cookiesfrombrowser"] = ("edge",)
+
+    print(f"[download] url={url}")
+    print(f"[download] max_height={max_height} proxy={proxy} cookies={cookies}")
     print("-" * 50)
-    
+
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        run_download(url, ydl_opts)
         print("-" * 50)
-        print("✅ 下载完成！")
-        return True
-        
-    except Exception as e:
-        if "DPAPI" in str(e) or "decrypt" in str(e).lower():
-            print(f"⚠️ Edge cookies 也失败，尝试 Firefox...")
-            return try_firefox(url, proxy)
-        else:
-            print(f"❌ 下载失败: {e}")
-            return try_no_cookies(url, proxy)
-
-
-def try_firefox(url: str, proxy: str = None) -> bool:
-    """尝试 Firefox"""
-    ydl_opts = {
-        "outtmpl": "%(title).200s.%(ext)s",
-        "format": "bestvideo[height<=1080]+bestaudio/best",
-        "merge_output_format": "mp4",
-        "noplaylist": True,
-        "cookiesfrombrowser": ("firefox",),
-    }
-    
-    if proxy:
-        ydl_opts["proxy"] = proxy
-    
-    try:
-        print("🦊 尝试 Firefox cookies...")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        print("✅ 下载完成！")
-        return True
-    except:
-        return try_no_cookies(url, proxy)
-
-
-def try_no_cookies(url: str, proxy: str = None) -> bool:
-    """不使用 cookies，用 Android 客户端"""
-    print("\n🔄 尝试 Android 客户端模式...")
-    
-    ydl_opts = {
-        "outtmpl": "%(title).200s.%(ext)s",
-        "format": "best[height<=720]/best",
-        "merge_output_format": "mp4",
-        "noplaylist": True,
-        "quiet": False,
-        
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android_vr", "android"],
-                "player_skip": ["webpage"],
-            }
-        },
-        
-        "http_headers": {
-            "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 14; en_US; sdk_gphone64_arm64 Build/UE1A.230829.036) gzip",
-        },
-    }
-    
-    if proxy:
-        ydl_opts["proxy"] = proxy
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        print("✅ 下载完成！")
+        print("Download complete.")
         return True
     except Exception as e:
-        print(f"❌ 失败: {e}")
+        if cookies == "auto" and ("DPAPI" in str(e) or "decrypt" in str(e).lower()):
+            print("Edge cookies failed, trying Firefox...")
+            return try_firefox(url, proxy, max_height)
+        if cookies == "auto":
+            print(f"Download failed: {e}")
+            return try_no_cookies(url, proxy, max_height)
+        print(f"Download failed: {e}")
+        print("Falling back to no-cookies mode...")
+        return try_no_cookies(url, proxy, max_height)
+
+
+def try_firefox(url: str, proxy: Optional[str], max_height: int) -> bool:
+    ydl_opts = base_opts(max_height, proxy)
+    ydl_opts["cookiesfrombrowser"] = ("firefox",)
+    try:
+        print("Trying Firefox cookies...")
+        run_download(url, ydl_opts)
+        print("Download complete.")
+        return True
+    except Exception:
+        return try_no_cookies(url, proxy, max_height)
+
+
+def try_no_cookies(url: str, proxy: Optional[str], max_height: int) -> bool:
+    print("Trying Android client without cookies...")
+
+    ydl_opts = base_opts(max_height, proxy)
+    ydl_opts["extractor_args"] = {
+        "youtube": {
+            "player_client": ["android_vr", "android"],
+            "player_skip": ["webpage"],
+        }
+    }
+    ydl_opts["http_headers"] = {
+        "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 14; en_US; sdk_gphone64_arm64 Build/UE1A.230829.036) gzip",
+    }
+
+    try:
+        run_download(url, ydl_opts)
+        print("Download complete.")
+        return True
+    except Exception as e:
+        print(f"Failed: {e}")
         show_manual_guide(url, proxy)
         return False
 
 
-def show_manual_guide(url: str, proxy: str):
-    """显示手动解决方案"""
+def show_manual_guide(url: str, proxy: Optional[str]) -> None:
     print("\n" + "=" * 50)
-    print("💡 手动解决方案")
+    print("Manual options")
     print("=" * 50)
-    print("\n方法1: 安装浏览器扩展导出 cookies")
-    print("  1. Chrome 安装: Get cookies.txt LOCALLY")
-    print("  2. 打开 YouTube 并登录")
-    print("  3. 点扩展导出 cookies.txt 到当前目录")
-    print("  4. 运行: yt-dlp --cookies cookies.txt <URL>")
-    print("\n方法2: 使用 Firefox (关闭后运行)")
-    print(f'  yt-dlp --cookies-from-browser firefox --proxy {proxy} "{url}"')
-    print("\n方法3: 更新 yt-dlp")
-    print("  uv pip install -U yt-dlp")
+    print("1) Update yt-dlp: python -m pip install -U yt-dlp")
+    if proxy:
+        print(f"2) Try CLI: yt-dlp --proxy {proxy} -f 136+140 --merge-output-format mp4 \"{url}\"")
+    else:
+        print(f"2) Try CLI: yt-dlp -f 136+140 --merge-output-format mp4 \"{url}\"")
 
 
-def test_connection(proxy: str) -> bool:
+def test_connection(proxy: Optional[str]) -> bool:
     import urllib.request
-    
-    print("🧪 测试 YouTube 连接...")
+
+    print("Testing YouTube connection...")
     try:
-        handler = urllib.request.ProxyHandler({'http': proxy, 'https': proxy})
+        if proxy:
+            handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        else:
+            handler = urllib.request.ProxyHandler({})
         opener = urllib.request.build_opener(handler)
-        opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
-        response = opener.open('https://www.youtube.com', timeout=10)
+        opener.addheaders = [("User-Agent", "Mozilla/5.0")]
+        response = opener.open("https://www.youtube.com", timeout=10)
         if response.status == 200:
-            print("✅ YouTube 连接成功！")
+            print("YouTube connection OK.")
             return True
     except Exception as e:
-        print(f"❌ 连接失败: {e}")
+        print(f"Connection failed: {e}")
     return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="YouTube downloader")
+    parser.add_argument("url", nargs="?", help="YouTube video URL")
+    parser.add_argument("--quality", type=int, default=1080, choices=[360, 480, 720, 1080])
+    parser.add_argument("--proxy", default=None, help="Proxy URL, e.g. http://127.0.0.1:7890")
+    parser.add_argument("--no-proxy", action="store_true", help="Disable proxy auto-detection")
+    parser.add_argument("--cookies", default="auto", choices=["auto", "edge", "firefox", "none"])
+    args = parser.parse_args()
+
+    proxy = args.proxy if args.proxy else (None if args.no_proxy else setup_proxy())
+    if not test_connection(proxy):
+        print("Warning: YouTube connection test failed. Will still try download.")
+
+    video_url = args.url or input("Enter video URL: ").strip()
+    if not video_url:
+        print("URL cannot be empty.")
+        return 1
+
+    print()
+    ok = download_video(video_url, proxy, max_height=args.quality, cookies=args.cookies)
+    return 0 if ok else 2
 
 
 if __name__ == "__main__":
     try:
-        print("=" * 50)
-        print("     YouTube 视频下载器 v3")
-        print("=" * 50)
-        
-        proxy = setup_proxy()
-        if not proxy:
-            print("⚠️ 未检测到代理")
-            sys.exit(1)
-        
-        if not test_connection(proxy):
-            sys.exit(1)
-        
-        # 提示关闭浏览器
-        print("\n⚠️  请确保已关闭 Edge/Chrome 浏览器窗口")
-        input("   按 Enter 继续...")
-        
-        video_url = input("\n请输入视频链接: ").strip()
-        if not video_url:
-            print("⚠️ 链接不能为空")
-            sys.exit(1)
-        
-        print()
-        download_video(video_url, proxy)
-        
+        raise SystemExit(main())
     except KeyboardInterrupt:
-        print("\n👋 已取消")
-        sys.exit(0)
+        print("\nCancelled.")
+        raise SystemExit(0)
