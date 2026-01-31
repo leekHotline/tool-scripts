@@ -14,3 +14,6 @@ uv sync
 
 ### 多模态
 文本 音频 图片 视频 
+
+### codex --ask-for-approval="never" 命令-执行-无需批准
+### codex exec 后台任务 无交互
